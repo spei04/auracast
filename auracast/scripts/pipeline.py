@@ -36,24 +36,34 @@ logger = logging.getLogger("pipeline")
 def _parse() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument(
-        "--source", choices=("local", "google-photos"), default="local",
-        help="Ingest backend.",
+        "--source", choices=("local", "google-photos", "google-drive"), default="local",
+        help="Ingest backend. Note: google-photos is restricted for new GCP projects "
+             "since 2024-2025; prefer google-drive.",
     )
     p.add_argument(
         "--source-dir", type=Path, default=None,
         help="(--source local) Directory of images to ingest.",
     )
     p.add_argument(
-        "--download-dir", type=Path, default=Path("data/google_photos_cache"),
-        help="(--source google-photos) Where to cache downloaded image bytes.",
+        "--download-dir", type=Path, default=Path("data/gphotos_cache"),
+        help="(--source google-*) Where to cache downloaded image bytes.",
     )
     p.add_argument(
         "--album-id", default=None,
         help="(--source google-photos) Restrict to one album.",
     )
     p.add_argument(
+        "--folder-id", default=None,
+        help="(--source google-drive) Restrict to one Drive folder ID "
+             "(the part after /folders/ in the URL).",
+    )
+    p.add_argument(
+        "--recursive", action="store_true",
+        help="(--source google-drive) Walk subfolders of --folder-id.",
+    )
+    p.add_argument(
         "--max-items", type=int, default=None,
-        help="(--source google-photos) Hard cap on items pulled per run.",
+        help="(--source google-*) Hard cap on items pulled per run.",
     )
     p.add_argument(
         "--manifest", type=Path, default=Path("manifests/latest.jsonl"),
@@ -153,6 +163,17 @@ def _build_ingest(args):
             download_dir=args.download_dir,
             album_id=args.album_id,
             max_items=args.max_items,
+        )
+    if args.source == "google-drive":
+        from auracast.auth.google_oauth import load_credentials
+        from auracast.ingest.google_drive import GoogleDriveIngest
+        creds = load_credentials(interactive=False)
+        return GoogleDriveIngest(
+            credentials=creds,
+            download_dir=args.download_dir,
+            folder_id=args.folder_id,
+            max_items=args.max_items,
+            recursive=args.recursive,
         )
     raise SystemExit(f"unknown source: {args.source}")
 
