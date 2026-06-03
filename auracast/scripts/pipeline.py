@@ -1,11 +1,15 @@
 """
 End-to-end production pipeline runner. Resumable, dedupe-aware.
 
-    # Score only (CLIP)
-    python -m auracast.scripts.pipeline --source-dir data/mock_images
+    # Local directory (default)
+    python -m auracast.scripts.pipeline --source local --source-dir data/mock_images
 
-    # Score + caption (CLIP + Qwen2-VL)
-    python -m auracast.scripts.pipeline --source-dir data/mock_images --caption
+    # Google Photos (requires prior auth_setup on a machine with a browser)
+    python -m auracast.scripts.pipeline --source google-photos \\
+        --download-dir data/google_photos_cache --max-items 100
+
+    # With captioning (any source)
+    python -m auracast.scripts.pipeline --source local --source-dir <dir> --caption
 
 Subsequent invocations with the same `--manifest` will *skip* images whose
 content_hash already appears, so iterating on a directory is cheap. Pass
@@ -31,7 +35,26 @@ logger = logging.getLogger("pipeline")
 
 def _parse() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--source-dir", type=Path, required=True, help="Directory of images to ingest.")
+    p.add_argument(
+        "--source", choices=("local", "google-photos"), default="local",
+        help="Ingest backend.",
+    )
+    p.add_argument(
+        "--source-dir", type=Path, default=None,
+        help="(--source local) Directory of images to ingest.",
+    )
+    p.add_argument(
+        "--download-dir", type=Path, default=Path("data/google_photos_cache"),
+        help="(--source google-photos) Where to cache downloaded image bytes.",
+    )
+    p.add_argument(
+        "--album-id", default=None,
+        help="(--source google-photos) Restrict to one album.",
+    )
+    p.add_argument(
+        "--max-items", type=int, default=None,
+        help="(--source google-photos) Hard cap on items pulled per run.",
+    )
     p.add_argument(
         "--manifest", type=Path, default=Path("manifests/latest.jsonl"),
         help="JSONL manifest to read/write. Created if missing.",
@@ -115,6 +138,25 @@ def _caption_pass(store: ManifestStore, items: list[ScoredImage], model_id: str 
                 len(items))
 
 
+def _build_ingest(args):
+    """Return an IngestSource subclass instance for the requested --source."""
+    if args.source == "local":
+        if args.source_dir is None:
+            raise SystemExit("--source local requires --source-dir")
+        return LocalDirectoryIngest(args.source_dir, compute_hash=True)
+    if args.source == "google-photos":
+        from auracast.auth.google_oauth import load_credentials
+        from auracast.ingest.google_photos import GooglePhotosIngest
+        creds = load_credentials(interactive=False)
+        return GooglePhotosIngest(
+            credentials=creds,
+            download_dir=args.download_dir,
+            album_id=args.album_id,
+            max_items=args.max_items,
+        )
+    raise SystemExit(f"unknown source: {args.source}")
+
+
 def main() -> None:
     args = _parse()
     do_caption = args.caption or args.recaption
@@ -122,9 +164,9 @@ def main() -> None:
     store = ManifestStore(args.manifest)
     logger.info("manifest: %s (%d existing items)", args.manifest, len(store))
 
-    ingest = LocalDirectoryIngest(args.source_dir, compute_hash=True)
+    ingest = _build_ingest(args)
     raw_records = ingest.collect()
-    logger.info("found %d images in %s", len(raw_records), args.source_dir)
+    logger.info("found %d images via --source %s", len(raw_records), args.source)
 
     # Partition for the scoring pass.
     todo_score: list[ImageRecord] = []
