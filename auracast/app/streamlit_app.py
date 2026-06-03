@@ -88,7 +88,7 @@ def main() -> None:  # pragma: no cover — Streamlit entry point
             with col:
                 rec = item.record
                 if rec.file_path and rec.file_path.exists():
-                    st.image(str(rec.file_path), use_column_width=True)
+                    st.image(str(rec.file_path), use_container_width=True)
                 else:
                     st.write("(image bytes unavailable)")
                 score = item.top_score()
