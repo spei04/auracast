@@ -35,6 +35,19 @@ class ReviewStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class ProcessingStatus(str, Enum):
+    """Machine-side processing state. Distinct from human ReviewStatus.
+
+    PENDING -> SCORED -> CAPTIONED is the happy path. FAILED is terminal
+    but recoverable (re-running the pipeline retries failed items).
+    """
+
+    PENDING = "pending"        # ingested, not yet through the engine
+    SCORED = "scored"          # has at least one AestheticScore + Embedding
+    CAPTIONED = "captioned"    # has scores + at least one Caption
+    FAILED = "failed"          # see `error` for details
+
+
 # -------- Core records ---------------------------------------------------
 
 
@@ -53,6 +66,7 @@ class ImageRecord(BaseModel):
     file_path: Path | None = None  # populated for local-disk-resident images
     source_url: HttpUrl | None = None  # populated for remote-only images
     source_ref: str | None = None  # opaque ID from the source (e.g. Google Photos mediaItem ID)
+    content_hash: str | None = None  # sha256 hex of raw bytes; key for dedupe
     ingested_at: datetime = Field(default_factory=_utcnow)
     width: int | None = None
     height: int | None = None
@@ -129,10 +143,26 @@ class ScoredImage(BaseModel):
     embeddings: list[Embedding] = Field(default_factory=list)
     captions: list[Caption] = Field(default_factory=list)
     review_status: ReviewStatus = ReviewStatus.PENDING
+    processing_status: ProcessingStatus = ProcessingStatus.PENDING
+    error: str | None = None  # populated when processing_status == FAILED
 
     def top_score(self) -> float | None:
         """Highest score across all scorers. None if no scores yet."""
         return max((s.score for s in self.scores), default=None)
+
+    def derive_processing_status(self) -> ProcessingStatus:
+        """Compute the appropriate status from the artifacts we have.
+
+        Doesn't mutate; callers assign the result to .processing_status. Useful
+        when the pipeline finishes a stage and needs to advance the state.
+        """
+        if self.error:
+            return ProcessingStatus.FAILED
+        if self.captions:
+            return ProcessingStatus.CAPTIONED
+        if self.scores and self.embeddings:
+            return ProcessingStatus.SCORED
+        return ProcessingStatus.PENDING
 
 
 # -------- Manifest -------------------------------------------------------

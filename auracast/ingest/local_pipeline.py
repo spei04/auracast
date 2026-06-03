@@ -19,6 +19,7 @@ import aiofiles  # noqa: F401  — pulled in so the dep is loaded; used in later
 from PIL import Image
 
 from auracast.ingest.base import IngestSource
+from auracast.persistence import sha256_file
 from auracast.schema.models import ImageRecord, IngestSourceKind
 
 logger = logging.getLogger(__name__)
@@ -34,10 +35,12 @@ class LocalDirectoryIngest(IngestSource):
         root: Path | str,
         suffixes: Iterable[str] = DEFAULT_IMAGE_SUFFIXES,
         recursive: bool = True,
+        compute_hash: bool = True,
     ):
         self.root = Path(root)
         self.suffixes = tuple(s.lower() for s in suffixes)
         self.recursive = recursive
+        self.compute_hash = compute_hash
         if not self.root.exists():
             raise FileNotFoundError(f"ingest root does not exist: {self.root}")
         if not self.root.is_dir():
@@ -57,9 +60,11 @@ class LocalDirectoryIngest(IngestSource):
             logger.warning("skipping %s: cannot decode (%s)", path, e)
             return None
         mime_type, _ = mimetypes.guess_type(path.name)
+        content_hash = sha256_file(path) if self.compute_hash else None
         return ImageRecord(
             source=IngestSourceKind.LOCAL_DIRECTORY,
             file_path=path,
+            content_hash=content_hash,
             width=width,
             height=height,
             file_size_bytes=path.stat().st_size,

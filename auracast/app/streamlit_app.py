@@ -3,6 +3,8 @@ Streamlit preview UI.
 
 Loads a JSONL manifest (output of the ingest+score pipeline), shows a grid of
 images sorted by aesthetic score, lets the operator approve or reject each.
+Reviews are persisted to the manifest via ManifestStore — closing the tab and
+re-opening preserves state.
 
 Run:
     streamlit run auracast/app/streamlit_app.py -- --manifest manifests/latest.jsonl
@@ -18,7 +20,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     st = None  # noqa: N816
 
-from auracast.schema.models import Manifest, ReviewStatus
+from auracast.persistence import ManifestStore
+from auracast.schema.models import ProcessingStatus, ReviewStatus
 
 
 def _parse_args() -> argparse.Namespace:
@@ -44,22 +47,42 @@ def main() -> None:  # pragma: no cover — Streamlit entry point
         st.warning(f"No manifest at {args.manifest}. Run the pipeline first.")
         return
 
-    manifest = Manifest.from_jsonl(args.manifest.read_text())
-    sorted_items = sorted(
-        manifest.items,
-        key=lambda x: (x.top_score() or 0.0),
-        reverse=True,
-    )
+    # ManifestStore is the canonical read/write path. Streamlit's reruns make
+    # this a hot path; we re-read on each render so that a separate pipeline
+    # run (or another tab) is reflected without restart.
+    store = ManifestStore(args.manifest)
 
-    st.sidebar.metric("Total images", len(manifest.items))
-    st.sidebar.metric(
-        "Approved",
-        sum(1 for x in manifest.items if x.review_status == ReviewStatus.APPROVED),
+    # ---- Sidebar: filters + counters -----------------------------------
+    st.sidebar.metric("Total images", len(store))
+    approved = sum(1 for x in store.all() if x.review_status == ReviewStatus.APPROVED)
+    rejected = sum(1 for x in store.all() if x.review_status == ReviewStatus.REJECTED)
+    pending = sum(1 for x in store.all() if x.review_status == ReviewStatus.PENDING)
+    st.sidebar.metric("Approved", approved)
+    st.sidebar.metric("Rejected", rejected)
+    st.sidebar.metric("Pending", pending)
+    st.sidebar.divider()
+
+    status_filter = st.sidebar.multiselect(
+        "Review status",
+        options=[s.value for s in ReviewStatus],
+        default=[ReviewStatus.PENDING.value, ReviewStatus.APPROVED.value],
     )
+    min_score = st.sidebar.slider("Minimum aesthetic score", 0.0, 1.0, 0.0, 0.01)
+    hide_failed = st.sidebar.checkbox("Hide failed", value=True)
+
+    # ---- Filter + sort -------------------------------------------------
+    items = store.all()
+    items = [x for x in items if x.review_status.value in status_filter]
+    if hide_failed:
+        items = [x for x in items if x.processing_status != ProcessingStatus.FAILED]
+    items = [x for x in items if (x.top_score() or 0.0) >= min_score]
+    items.sort(key=lambda x: (x.top_score() or 0.0), reverse=True)
+
+    st.write(f"Showing **{len(items)}** image(s).")
 
     cols_per_row = 4
-    for row_start in range(0, len(sorted_items), cols_per_row):
-        row = sorted_items[row_start:row_start + cols_per_row]
+    for row_start in range(0, len(items), cols_per_row):
+        row = items[row_start:row_start + cols_per_row]
         cols = st.columns(cols_per_row)
         for col, item in zip(cols, row):
             with col:
@@ -70,12 +93,20 @@ def main() -> None:  # pragma: no cover — Streamlit entry point
                     st.write("(image bytes unavailable)")
                 score = item.top_score()
                 st.caption(f"score = {score:.3f}" if score is not None else "unscored")
-                st.caption(f"`{rec.image_id.hex[:8]}` · {rec.source.value}")
+                badge = {
+                    ReviewStatus.PENDING: "🟡 pending",
+                    ReviewStatus.APPROVED: "✅ approved",
+                    ReviewStatus.REJECTED: "❌ rejected",
+                }[item.review_status]
+                st.caption(f"`{rec.image_id.hex[:8]}` · {rec.source.value} · {badge}")
+
                 btn_cols = st.columns(2)
                 if btn_cols[0].button("Approve", key=f"a-{rec.image_id}"):
-                    item.review_status = ReviewStatus.APPROVED
+                    store.update_review(rec.image_id, ReviewStatus.APPROVED)
+                    st.rerun()
                 if btn_cols[1].button("Reject", key=f"r-{rec.image_id}"):
-                    item.review_status = ReviewStatus.REJECTED
+                    store.update_review(rec.image_id, ReviewStatus.REJECTED)
+                    st.rerun()
 
 
 if __name__ == "__main__":  # pragma: no cover

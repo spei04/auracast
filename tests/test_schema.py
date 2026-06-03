@@ -14,6 +14,7 @@ from auracast.schema.models import (
     ImageRecord,
     IngestSourceKind,
     Manifest,
+    ProcessingStatus,
     ReviewStatus,
     ScoredImage,
 )
@@ -91,6 +92,7 @@ def test_manifest_jsonl_round_trip():
         scores=[AestheticScore(image_id=rec.image_id, scorer="clip", score=0.7)],
         embeddings=[Embedding(image_id=rec.image_id, model="clip", dim=2, vector=[0.5, 0.5])],
         review_status=ReviewStatus.APPROVED,
+        processing_status=ProcessingStatus.SCORED,
     )
     m = Manifest(items=[si, si])
     text = m.to_jsonl()
@@ -98,3 +100,15 @@ def test_manifest_jsonl_round_trip():
     m2 = Manifest.from_jsonl(text)
     assert len(m2.items) == 2
     assert m2.items[0].review_status == ReviewStatus.APPROVED
+    assert m2.items[0].processing_status == ProcessingStatus.SCORED
+
+
+def test_processing_status_default_is_pending():
+    si = ScoredImage(record=ImageRecord(source=IngestSourceKind.LOCAL_DIRECTORY))
+    assert si.processing_status == ProcessingStatus.PENDING
+    assert si.error is None
+
+
+def test_image_record_content_hash_stored():
+    rec = ImageRecord(source=IngestSourceKind.LOCAL_DIRECTORY, content_hash="deadbeef")
+    assert rec.content_hash == "deadbeef"
