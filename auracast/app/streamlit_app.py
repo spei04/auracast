@@ -100,6 +100,13 @@ def main() -> None:  # pragma: no cover — Streamlit entry point
                 }[item.review_status]
                 st.caption(f"`{rec.image_id.hex[:8]}` · {rec.source.value} · {badge}")
 
+                if item.captions:
+                    latest = item.captions[-1]
+                    st.write(latest.caption)
+                    if latest.attributes:
+                        attr_str = " · ".join(f"**{k}:** {v}" for k, v in latest.attributes.items())
+                        st.caption(attr_str)
+
                 btn_cols = st.columns(2)
                 if btn_cols[0].button("Approve", key=f"a-{rec.image_id}"):
                     store.update_review(rec.image_id, ReviewStatus.APPROVED)
