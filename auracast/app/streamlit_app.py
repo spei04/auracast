@@ -92,40 +92,66 @@ def _render_project_picker(projects: ProjectsStore, manifests_dir: Path) -> Driv
 
 
 def _render_new_project_form(projects: ProjectsStore, manifests_dir: Path) -> None:
-    name = st.text_input("Project name", placeholder="e.g. Spring Aesthetic", key="np_name")
-    folder_input = st.text_input(
-        "Drive folder URL or ID",
-        placeholder="https://drive.google.com/drive/folders/... or just the ID",
-        key="np_folder",
-    )
+    """New-project form: pick from Drive OR paste URL/ID. No nested expanders.
 
-    with st.expander("...or pick from your Drive"):
-        if st.button("🔍 Load my folders"):
+    Streamlit forbids st.expander inside st.expander, so the picker is laid
+    out inline here. Loaded folders are cached in session_state so re-runs
+    don't re-fetch.
+    """
+    name = st.text_input("Project name", placeholder="e.g. Spring Aesthetic", key="np_name")
+
+    # ---- Folder picker (primary path) ----------------------------------
+    st.markdown("**Pick a folder from your Drive:**")
+    cols = st.columns([3, 1])
+    with cols[1]:
+        if st.button("🔄 Refresh", key="np_load_folders", help="Fetch your Drive folder list"):
             try:
                 from auracast.auth.google_oauth import load_credentials
                 from auracast.ingest.google_drive import list_my_folders
                 creds = load_credentials(interactive=False)
-                folders = list_my_folders(creds, max_items=200)
+                folders = list_my_folders(creds, max_items=500)
                 st.session_state["available_folders"] = folders
+                if not folders:
+                    st.warning("No folders found in your Drive.")
             except Exception as e:  # noqa: BLE001
                 st.error(f"Couldn't list folders: {e}")
-        folders = st.session_state.get("available_folders", [])
-        if folders:
-            labels = [f"{f['name']}  ({f['id'][:12]}…)" for f in folders]
-            picked = st.selectbox("Folder", options=["—"] + labels, key="np_picker")
-            if picked != "—":
-                # Backfill the folder_input box with the picked ID.
-                idx = labels.index(picked)
-                folder_input = folders[idx]["id"]
-                st.caption(f"Selected: `{folder_input}`")
 
-    if st.button("Create project", type="primary"):
+    folders = st.session_state.get("available_folders", [])
+    picked_folder_id = ""
+    with cols[0]:
+        if not folders:
+            st.caption("Click **Refresh** to load your Drive folders.")
+        else:
+            options = ["— pick a folder —"] + [f["name"] for f in folders]
+            choice = st.selectbox(
+                f"Your folders ({len(folders)})",
+                options=options,
+                key="np_picker",
+                label_visibility="collapsed",
+            )
+            if choice != "— pick a folder —":
+                idx = options.index(choice) - 1
+                picked_folder_id = folders[idx]["id"]
+                st.caption(f"Selected ID: `{picked_folder_id[:24]}…`")
+
+    # ---- Manual entry (fallback) ---------------------------------------
+    st.markdown("**Or paste a Drive URL / ID:**")
+    folder_input = st.text_input(
+        "URL or ID",
+        placeholder="https://drive.google.com/drive/folders/...",
+        key="np_folder",
+        label_visibility="collapsed",
+    )
+
+    # The picker takes priority over the text box.
+    folder_id = picked_folder_id or parse_folder_id(folder_input)
+
+    if st.button("Create project", type="primary", key="np_create"):
         if not name.strip():
             st.error("Project name is required.")
             return
-        folder_id = parse_folder_id(folder_input)
         if not folder_id:
-            st.error("Folder URL or ID is required.")
+            st.error("Pick a folder or paste a URL/ID.")
             return
         if projects.get(name.strip()):
             st.error(f"A project named '{name.strip()}' already exists.")
