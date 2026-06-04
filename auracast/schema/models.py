@@ -165,6 +165,46 @@ class ScoredImage(BaseModel):
         return ProcessingStatus.PENDING
 
 
+# -------- Projects ------------------------------------------------------
+
+
+class DriveProject(BaseModel):
+    """One curation project = one Drive folder + one manifest file."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str  # user-facing label, must be unique within ProjectsConfig
+    folder_id: str  # Drive folder ID
+    manifest_path: Path  # where this project's JSONL lives
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class ProjectsConfig(BaseModel):
+    """The on-disk list of curation projects."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    projects: list[DriveProject] = Field(default_factory=list)
+    active_project_name: str | None = None
+
+    def get(self, name: str) -> DriveProject | None:
+        return next((p for p in self.projects if p.name == name), None)
+
+    def add(self, project: DriveProject) -> None:
+        if self.get(project.name) is not None:
+            raise ValueError(f"project '{project.name}' already exists")
+        self.projects.append(project)
+        if self.active_project_name is None:
+            self.active_project_name = project.name
+
+    def remove(self, name: str) -> bool:
+        before = len(self.projects)
+        self.projects = [p for p in self.projects if p.name != name]
+        if self.active_project_name == name:
+            self.active_project_name = self.projects[0].name if self.projects else None
+        return len(self.projects) < before
+
+
 # -------- Manifest -------------------------------------------------------
 
 

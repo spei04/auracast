@@ -30,11 +30,13 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-# Scopes we'll need for Phase 2. Keep narrow — Photos read-only is enough for
-# curation; Drive is a fallback ingest path.
+# Scopes. We need full `drive` (not just `drive.readonly`) because the
+# Streamlit "Finalize" action moves rejected images to Drive Trash, which
+# requires write permission. Photos scope is kept for compatibility with
+# pre-2024 GCP projects that still have Library API access.
 DEFAULT_SCOPES: tuple[str, ...] = (
     "https://www.googleapis.com/auth/photoslibrary.readonly",
-    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive",
 )
 
 

@@ -1,5 +1,5 @@
 """
-Google Drive ingest.
+Google Drive ingest + lightweight folder/file management helpers.
 
 Same IngestSource shape as LocalDirectoryIngest / GooglePhotosIngest — the
 pipeline doesn't know or care which one it's holding. Lists image files in
@@ -7,14 +7,15 @@ Drive (optionally restricted to a folder), downloads bytes via the Drive
 v3 `files.get_media` endpoint, writes a content_hash, yields ImageRecord
 rows with source=GOOGLE_DRIVE.
 
-Used as the **default Google backend** after the Photos Library API was
-locked down for new third-party apps in 2024-2025. To use:
-  - Put images in any Google Drive folder.
-  - Get its folder ID from the URL (the part after /folders/).
-  - Pass it as folder_id, or leave None to walk all images you own.
+Also exposes module-level helpers used by the Streamlit UI:
+  - list_my_folders(credentials, ...) — for the folder picker.
+  - trash_files(credentials, file_ids) — for the Finalize button.
+Both require the full `drive` scope (see auracast.auth.google_oauth).
 
-Drive scope: drive.readonly is already requested by default_scopes in
-auracast.auth.google_oauth.
+To use as ingest:
+  - Put images in any Google Drive folder.
+  - Get its folder ID from the URL (the part after /folders/), or use the
+    UI folder picker.
 """
 
 from __future__ import annotations
@@ -214,3 +215,52 @@ class GoogleDriveIngest(IngestSource):
             if rec is not None:
                 out.append(rec)
         return out
+
+
+# -------- Module-level helpers (for the Streamlit UI) -------------------
+
+
+def list_my_folders(
+    credentials, *, page_size: int = 100, max_items: int = 200,
+) -> list[dict]:
+    """Return [{'id', 'name', 'parents'}] for folders the user has access to.
+
+    Capped at `max_items` to keep the picker UI responsive. Use for the
+    folder dropdown in Streamlit.
+    """
+    service = build_drive_service(credentials)
+    q = "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    fields = "nextPageToken, files(id, name, parents)"
+    out: list[dict] = []
+    page_token = None
+    while True:
+        kwargs = {"q": q, "pageSize": min(page_size, MAX_PAGE_SIZE), "fields": fields,
+                  "orderBy": "name"}
+        if page_token:
+            kwargs["pageToken"] = page_token
+        resp = service.files().list(**kwargs).execute()
+        for f in resp.get("files", []) or []:
+            out.append(f)
+            if len(out) >= max_items:
+                return out
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            return out
+
+
+def trash_files(credentials, file_ids: list[str]) -> dict[str, str | None]:
+    """Move the given Drive file IDs to Trash. Soft delete — recoverable in
+    Drive UI for ~30 days.
+
+    Returns {file_id: error_message_or_None}. None means success.
+    """
+    service = build_drive_service(credentials)
+    results: dict[str, str | None] = {}
+    for fid in file_ids:
+        try:
+            service.files().update(fileId=fid, body={"trashed": True}).execute()
+            results[fid] = None
+        except Exception as e:  # noqa: BLE001
+            logger.warning("trash failed for %s: %s", fid, e)
+            results[fid] = f"{type(e).__name__}: {e}"
+    return results

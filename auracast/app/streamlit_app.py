@@ -1,24 +1,19 @@
 """
 Streamlit preview UI.
 
-Loads a JSONL manifest (output of the ingest+score pipeline), shows a grid of
-images sorted by aesthetic score, lets the operator approve or reject each.
-Reviews are persisted to the manifest via ManifestStore — closing the tab and
-re-opening preserves state.
-
-Includes a "Sync from Drive" sidebar control: enter a Drive folder ID, click
-Sync, and the app pulls + scores any new images in-process. Dedupe means
-already-known images aren't re-fetched or re-scored.
+Multi-project curation. Each project = one Drive folder + one manifest.
+Switch between projects via the sidebar. Each project tracks its own
+approve/reject state. A "Finalize" button per project moves rejected
+images to Drive Trash so the folder ends up as exactly the approved set.
 
 Run:
-    streamlit run auracast/app/streamlit_app.py -- --manifest manifests/latest.jsonl
+    streamlit run auracast/app/streamlit_app.py
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
-import os
 from pathlib import Path
 
 try:
@@ -27,7 +22,12 @@ except ModuleNotFoundError:  # pragma: no cover
     st = None  # noqa: N816
 
 from auracast.persistence import ManifestStore
-from auracast.schema.models import ProcessingStatus, ReviewStatus
+from auracast.projects import ProjectsStore, parse_folder_id, slugify
+from auracast.schema.models import (
+    DriveProject,
+    ProcessingStatus,
+    ReviewStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,18 +35,162 @@ logger = logging.getLogger(__name__)
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--manifest",
+        "--projects-config",
         type=Path,
-        default=Path("manifests/latest.jsonl"),
-        help="Path to a Manifest JSONL written by the pipeline.",
+        default=Path("manifests/projects.json"),
+        help="Path to the projects config JSON.",
+    )
+    parser.add_argument(
+        "--manifests-dir",
+        type=Path,
+        default=Path("manifests"),
+        help="Directory where per-project manifests are stored.",
     )
     parser.add_argument(
         "--download-dir",
         type=Path,
         default=Path("data/gdrive_cache"),
-        help="Cache directory used by the in-app Drive sync.",
+        help="Cache directory used by Drive sync.",
     )
     return parser.parse_args()
+
+
+# -------- Sidebar sections ---------------------------------------------
+
+
+def _render_project_picker(projects: ProjectsStore, manifests_dir: Path) -> DriveProject | None:
+    """Top-of-sidebar project switcher + new-project form. Returns the active project."""
+    st.sidebar.header("📁 Projects")
+    all_projects = projects.all()
+
+    if not all_projects:
+        st.sidebar.info("No projects yet. Create one below to get started.")
+    else:
+        names = [p.name for p in all_projects]
+        active = projects.active()
+        idx = names.index(active.name) if active else 0
+        selected = st.sidebar.selectbox(
+            "Active project",
+            options=names,
+            index=idx,
+            key="active_project_select",
+        )
+        if active is None or selected != active.name:
+            projects.set_active(selected)
+
+    with st.sidebar.expander("➕ New project", expanded=not all_projects):
+        _render_new_project_form(projects, manifests_dir)
+
+    return projects.active()
+
+
+def _render_new_project_form(projects: ProjectsStore, manifests_dir: Path) -> None:
+    name = st.text_input("Project name", placeholder="e.g. Spring Aesthetic", key="np_name")
+    folder_input = st.text_input(
+        "Drive folder URL or ID",
+        placeholder="https://drive.google.com/drive/folders/... or just the ID",
+        key="np_folder",
+    )
+
+    with st.expander("...or pick from your Drive"):
+        if st.button("🔍 Load my folders"):
+            try:
+                from auracast.auth.google_oauth import load_credentials
+                from auracast.ingest.google_drive import list_my_folders
+                creds = load_credentials(interactive=False)
+                folders = list_my_folders(creds, max_items=200)
+                st.session_state["available_folders"] = folders
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Couldn't list folders: {e}")
+        folders = st.session_state.get("available_folders", [])
+        if folders:
+            labels = [f"{f['name']}  ({f['id'][:12]}…)" for f in folders]
+            picked = st.selectbox("Folder", options=["—"] + labels, key="np_picker")
+            if picked != "—":
+                # Backfill the folder_input box with the picked ID.
+                idx = labels.index(picked)
+                folder_input = folders[idx]["id"]
+                st.caption(f"Selected: `{folder_input}`")
+
+    if st.button("Create project", type="primary"):
+        if not name.strip():
+            st.error("Project name is required.")
+            return
+        folder_id = parse_folder_id(folder_input)
+        if not folder_id:
+            st.error("Folder URL or ID is required.")
+            return
+        if projects.get(name.strip()):
+            st.error(f"A project named '{name.strip()}' already exists.")
+            return
+        manifest_path = manifests_dir / f"{slugify(name)}.jsonl"
+        project = DriveProject(
+            name=name.strip(),
+            folder_id=folder_id,
+            manifest_path=manifest_path,
+        )
+        projects.add(project)
+        projects.set_active(project.name)
+        st.success(f"Created '{project.name}'. Use Sync to populate it.")
+        st.rerun()
+
+
+def _render_sync_sidebar(project: DriveProject, store: ManifestStore, download_dir: Path) -> None:
+    st.sidebar.subheader("⚙️ Sync from Drive")
+    max_items = st.sidebar.number_input(
+        "Max items per sync", min_value=1, max_value=500, value=50, step=10,
+    )
+    if st.sidebar.button("🔄 Sync now", type="primary", use_container_width=True):
+        with st.spinner("Pulling + scoring from Drive..."):
+            try:
+                new_count, skipped = _sync_from_drive(
+                    store, project.folder_id, int(max_items), download_dir,
+                )
+            except Exception as e:  # noqa: BLE001
+                st.sidebar.error(f"Sync failed: {e}")
+            else:
+                st.sidebar.success(
+                    f"Synced {new_count + skipped} item(s) "
+                    f"({new_count} new, {skipped} already known)."
+                )
+                st.rerun()
+
+
+def _render_finalize_section(project: DriveProject, store: ManifestStore) -> None:
+    """Bottom-of-page button: trash all REJECTED items on Drive."""
+    rejected = [x for x in store.all() if x.review_status == ReviewStatus.REJECTED]
+    st.divider()
+    st.subheader("🗑 Finalize project")
+    st.write(
+        f"**{len(rejected)}** rejected image(s) will be moved to Drive Trash. "
+        f"They stay recoverable in Drive's Trash for ~30 days."
+    )
+    if not rejected:
+        return
+    confirm = st.checkbox(
+        f"I understand — move {len(rejected)} file(s) to Drive Trash",
+        key=f"finalize_confirm_{project.name}",
+    )
+    if st.button(
+        "Finalize: trash rejected on Drive",
+        disabled=not confirm,
+        type="primary",
+        key=f"finalize_btn_{project.name}",
+    ):
+        with st.spinner("Trashing rejected files on Drive..."):
+            try:
+                ok, failed = _trash_rejected(store, rejected)
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Finalize failed: {e}")
+            else:
+                if failed:
+                    st.warning(f"Trashed {ok}; {len(failed)} failed: {failed}")
+                else:
+                    st.success(f"Trashed {ok} file(s) on Drive.")
+                st.rerun()
+
+
+# -------- Backend helpers ----------------------------------------------
 
 
 def _sync_from_drive(
@@ -56,9 +200,7 @@ def _sync_from_drive(
     download_dir: Path,
 ) -> tuple[int, int]:
     """Pull from Drive, dedupe by content_hash, score new images.
-
-    Returns (new_count, skipped_count).
-    """
+    Returns (new_count, skipped_count)."""
     from auracast.auth.google_oauth import load_credentials
     from auracast.ingest.google_drive import GoogleDriveIngest
     from auracast.scripts.pipeline import _score_pass
@@ -72,7 +214,6 @@ def _sync_from_drive(
     )
     raw_records = ingest.collect()
 
-    # Dedupe against the existing manifest by content_hash.
     new_records = []
     skipped = 0
     for rec in raw_records:
@@ -83,49 +224,28 @@ def _sync_from_drive(
 
     if new_records:
         _score_pass(store, new_records, batch_size=16)
-        store.bulk_add([])  # flush
+        store.bulk_add([])
 
     return len(new_records), skipped
 
 
-def _render_sync_sidebar(store: ManifestStore, download_dir: Path) -> None:
-    """Render the Drive sync controls. Re-runs Streamlit when work happens."""
-    st.sidebar.subheader("Sync from Drive")
+def _trash_rejected(store: ManifestStore, rejected_items) -> tuple[int, dict[str, str]]:
+    """Move rejected images' Drive originals to Trash. Returns (ok, failed_map)."""
+    from auracast.auth.google_oauth import load_credentials
+    from auracast.ingest.google_drive import trash_files
 
-    # Saved folder ID persists across reruns via session_state; seed from
-    # env var so the user can default it without typing each time.
-    default_folder = st.session_state.get(
-        "drive_folder_id",
-        os.environ.get("AURACAST_DRIVE_FOLDER", ""),
-    )
-    folder_id = st.sidebar.text_input(
-        "Drive folder ID",
-        value=default_folder,
-        help="The part after /folders/ in your Drive URL.",
-        key="drive_folder_input",
-    )
-    max_items = st.sidebar.number_input(
-        "Max items per sync", min_value=1, max_value=500, value=50, step=10,
-    )
+    file_ids = [it.record.source_ref for it in rejected_items if it.record.source_ref]
+    if not file_ids:
+        return 0, {}
 
-    if st.sidebar.button("🔄 Sync now", type="primary", use_container_width=True):
-        if not folder_id.strip():
-            st.sidebar.error("Enter a folder ID first.")
-        else:
-            st.session_state["drive_folder_id"] = folder_id.strip()
-            with st.spinner("Pulling + scoring from Drive..."):
-                try:
-                    new_count, skipped = _sync_from_drive(
-                        store, folder_id.strip(), int(max_items), download_dir,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    st.sidebar.error(f"Sync failed: {e}")
-                else:
-                    st.sidebar.success(
-                        f"Synced {new_count + skipped} item(s) "
-                        f"({new_count} new, {skipped} already known)."
-                    )
-                    st.rerun()
+    creds = load_credentials(interactive=False)
+    results = trash_files(creds, file_ids)
+    ok = sum(1 for v in results.values() if v is None)
+    failed = {k: v for k, v in results.items() if v is not None}
+    return ok, failed
+
+
+# -------- Main page ----------------------------------------------------
 
 
 def main() -> None:  # pragma: no cover — Streamlit entry point
@@ -136,21 +256,34 @@ def main() -> None:  # pragma: no cover — Streamlit entry point
     st.set_page_config(page_title="AuraCast", layout="wide")
     st.title("AuraCast — Curation Preview")
 
-    # ManifestStore handles a missing file by starting empty — important so the
-    # Sync button works on a fresh install with no manifest yet.
-    args.manifest.parent.mkdir(parents=True, exist_ok=True)
-    store = ManifestStore(args.manifest)
+    args.projects_config.parent.mkdir(parents=True, exist_ok=True)
+    args.manifests_dir.mkdir(parents=True, exist_ok=True)
+    projects = ProjectsStore(args.projects_config)
+    project = _render_project_picker(projects, args.manifests_dir)
 
-    # ---- Sidebar: sync + filters + counters ----------------------------
-    _render_sync_sidebar(store, args.download_dir)
+    if project is None:
+        st.info("Create your first project from the sidebar.")
+        return
+
+    st.subheader(f"Project: {project.name}")
+    st.caption(
+        f"Drive folder `{project.folder_id}` · manifest `{project.manifest_path}`"
+    )
+
+    project.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    store = ManifestStore(project.manifest_path)
+
+    # Sidebar sync, filters, stats
+    st.sidebar.divider()
+    _render_sync_sidebar(project, store, args.download_dir)
     st.sidebar.divider()
 
     st.sidebar.metric("Total images", len(store))
     approved = sum(1 for x in store.all() if x.review_status == ReviewStatus.APPROVED)
-    rejected = sum(1 for x in store.all() if x.review_status == ReviewStatus.REJECTED)
+    rejected_count = sum(1 for x in store.all() if x.review_status == ReviewStatus.REJECTED)
     pending = sum(1 for x in store.all() if x.review_status == ReviewStatus.PENDING)
     st.sidebar.metric("Approved", approved)
-    st.sidebar.metric("Rejected", rejected)
+    st.sidebar.metric("Rejected", rejected_count)
     st.sidebar.metric("Pending", pending)
     st.sidebar.divider()
 
@@ -163,10 +296,9 @@ def main() -> None:  # pragma: no cover — Streamlit entry point
     hide_failed = st.sidebar.checkbox("Hide failed", value=True)
 
     if len(store) == 0:
-        st.info("No images yet. Use the sidebar Sync from Drive to get started.")
+        st.info("No images yet. Use **Sync from Drive** in the sidebar to populate this project.")
         return
 
-    # ---- Filter + sort -------------------------------------------------
     items = store.all()
     items = [x for x in items if x.review_status.value in status_filter]
     if hide_failed:
@@ -210,6 +342,8 @@ def main() -> None:  # pragma: no cover — Streamlit entry point
                 if btn_cols[1].button("Reject", key=f"r-{rec.image_id}"):
                     store.update_review(rec.image_id, ReviewStatus.REJECTED)
                     st.rerun()
+
+    _render_finalize_section(project, store)
 
 
 if __name__ == "__main__":  # pragma: no cover
