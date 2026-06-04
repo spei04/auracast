@@ -453,12 +453,21 @@ def main() -> None:  # pragma: no cover — Streamlit entry point
                         attr_str = " · ".join(f"**{k}:** {v}" for k, v in latest.attributes.items())
                         st.caption(attr_str)
 
-                btn_cols = st.columns(2)
+                btn_cols = st.columns(3)
                 if btn_cols[0].button("Approve", key=f"a-{rec.image_id}"):
                     store.update_review(rec.image_id, ReviewStatus.APPROVED)
                     st.rerun()
                 if btn_cols[1].button("Reject", key=f"r-{rec.image_id}"):
                     store.update_review(rec.image_id, ReviewStatus.REJECTED)
+                    st.rerun()
+                # Undo: back to PENDING. Only enabled if the item isn't already pending.
+                is_pending = item.review_status == ReviewStatus.PENDING
+                if btn_cols[2].button(
+                    "↺", key=f"u-{rec.image_id}",
+                    help="Reset to pending",
+                    disabled=is_pending,
+                ):
+                    store.update_review(rec.image_id, ReviewStatus.PENDING)
                     st.rerun()
 
     _render_finalize_section(project, store)
