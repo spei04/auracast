@@ -370,15 +370,15 @@ def main() -> None:  # pragma: no cover — Streamlit entry point
 
     st.set_page_config(page_title="AuraCast", layout="wide")
 
-    # Keep button labels on one line when columns narrow — wrapping looks ugly
-    # in the per-image Approve/Reject/Undo row and the sidebar action buttons.
+    # Buttons size to their label (instead of filling the column) AND never
+    # wrap to a second line. Narrower columns just leave whitespace around
+    # the button instead of squeezing the text.
     st.markdown(
         """
         <style>
         .stButton > button {
             white-space: nowrap !important;
-            overflow: hidden !important;
-            text-overflow: ellipsis !important;
+            width: auto !important;
             min-width: 0 !important;
         }
         </style>
