@@ -6,6 +6,10 @@ images sorted by aesthetic score, lets the operator approve or reject each.
 Reviews are persisted to the manifest via ManifestStore — closing the tab and
 re-opening preserves state.
 
+Includes a "Sync from Drive" sidebar control: enter a Drive folder ID, click
+Sync, and the app pulls + scores any new images in-process. Dedupe means
+already-known images aren't re-fetched or re-scored.
+
 Run:
     streamlit run auracast/app/streamlit_app.py -- --manifest manifests/latest.jsonl
 """
@@ -13,6 +17,8 @@ Run:
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 from pathlib import Path
 
 try:
@@ -23,6 +29,8 @@ except ModuleNotFoundError:  # pragma: no cover
 from auracast.persistence import ManifestStore
 from auracast.schema.models import ProcessingStatus, ReviewStatus
 
+logger = logging.getLogger(__name__)
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -32,7 +40,92 @@ def _parse_args() -> argparse.Namespace:
         default=Path("manifests/latest.jsonl"),
         help="Path to a Manifest JSONL written by the pipeline.",
     )
+    parser.add_argument(
+        "--download-dir",
+        type=Path,
+        default=Path("data/gdrive_cache"),
+        help="Cache directory used by the in-app Drive sync.",
+    )
     return parser.parse_args()
+
+
+def _sync_from_drive(
+    store: ManifestStore,
+    folder_id: str,
+    max_items: int,
+    download_dir: Path,
+) -> tuple[int, int]:
+    """Pull from Drive, dedupe by content_hash, score new images.
+
+    Returns (new_count, skipped_count).
+    """
+    from auracast.auth.google_oauth import load_credentials
+    from auracast.ingest.google_drive import GoogleDriveIngest
+    from auracast.scripts.pipeline import _score_pass
+
+    creds = load_credentials(interactive=False)
+    ingest = GoogleDriveIngest(
+        credentials=creds,
+        download_dir=download_dir,
+        folder_id=folder_id,
+        max_items=max_items,
+    )
+    raw_records = ingest.collect()
+
+    # Dedupe against the existing manifest by content_hash.
+    new_records = []
+    skipped = 0
+    for rec in raw_records:
+        if rec.content_hash and store.find_by_hash(rec.content_hash) is not None:
+            skipped += 1
+            continue
+        new_records.append(rec)
+
+    if new_records:
+        _score_pass(store, new_records, batch_size=16)
+        store.bulk_add([])  # flush
+
+    return len(new_records), skipped
+
+
+def _render_sync_sidebar(store: ManifestStore, download_dir: Path) -> None:
+    """Render the Drive sync controls. Re-runs Streamlit when work happens."""
+    st.sidebar.subheader("Sync from Drive")
+
+    # Saved folder ID persists across reruns via session_state; seed from
+    # env var so the user can default it without typing each time.
+    default_folder = st.session_state.get(
+        "drive_folder_id",
+        os.environ.get("AURACAST_DRIVE_FOLDER", ""),
+    )
+    folder_id = st.sidebar.text_input(
+        "Drive folder ID",
+        value=default_folder,
+        help="The part after /folders/ in your Drive URL.",
+        key="drive_folder_input",
+    )
+    max_items = st.sidebar.number_input(
+        "Max items per sync", min_value=1, max_value=500, value=50, step=10,
+    )
+
+    if st.sidebar.button("🔄 Sync now", type="primary", use_container_width=True):
+        if not folder_id.strip():
+            st.sidebar.error("Enter a folder ID first.")
+        else:
+            st.session_state["drive_folder_id"] = folder_id.strip()
+            with st.spinner("Pulling + scoring from Drive..."):
+                try:
+                    new_count, skipped = _sync_from_drive(
+                        store, folder_id.strip(), int(max_items), download_dir,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    st.sidebar.error(f"Sync failed: {e}")
+                else:
+                    st.sidebar.success(
+                        f"Synced {new_count + skipped} item(s) "
+                        f"({new_count} new, {skipped} already known)."
+                    )
+                    st.rerun()
 
 
 def main() -> None:  # pragma: no cover — Streamlit entry point
@@ -43,16 +136,15 @@ def main() -> None:  # pragma: no cover — Streamlit entry point
     st.set_page_config(page_title="AuraCast", layout="wide")
     st.title("AuraCast — Curation Preview")
 
-    if not args.manifest.exists():
-        st.warning(f"No manifest at {args.manifest}. Run the pipeline first.")
-        return
-
-    # ManifestStore is the canonical read/write path. Streamlit's reruns make
-    # this a hot path; we re-read on each render so that a separate pipeline
-    # run (or another tab) is reflected without restart.
+    # ManifestStore handles a missing file by starting empty — important so the
+    # Sync button works on a fresh install with no manifest yet.
+    args.manifest.parent.mkdir(parents=True, exist_ok=True)
     store = ManifestStore(args.manifest)
 
-    # ---- Sidebar: filters + counters -----------------------------------
+    # ---- Sidebar: sync + filters + counters ----------------------------
+    _render_sync_sidebar(store, args.download_dir)
+    st.sidebar.divider()
+
     st.sidebar.metric("Total images", len(store))
     approved = sum(1 for x in store.all() if x.review_status == ReviewStatus.APPROVED)
     rejected = sum(1 for x in store.all() if x.review_status == ReviewStatus.REJECTED)
@@ -69,6 +161,10 @@ def main() -> None:  # pragma: no cover — Streamlit entry point
     )
     min_score = st.sidebar.slider("Minimum aesthetic score", 0.0, 1.0, 0.0, 0.01)
     hide_failed = st.sidebar.checkbox("Hide failed", value=True)
+
+    if len(store) == 0:
+        st.info("No images yet. Use the sidebar Sync from Drive to get started.")
+        return
 
     # ---- Filter + sort -------------------------------------------------
     items = store.all()
