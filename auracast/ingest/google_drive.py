@@ -223,13 +223,18 @@ class GoogleDriveIngest(IngestSource):
 def list_my_folders(
     credentials, *, page_size: int = 100, max_items: int = 200,
 ) -> list[dict]:
-    """Return [{'id', 'name', 'parents'}] for folders the user has access to.
+    """Return [{'id', 'name', 'parents'}] for folders the user *owns*.
 
-    Capped at `max_items` to keep the picker UI responsive. Use for the
-    folder dropdown in Streamlit.
+    Filters out folders shared with the user from elsewhere via the
+    `'me' in owners` predicate. Capped at `max_items` to keep the picker
+    UI responsive. Use for the folder dropdown in Streamlit.
     """
     service = build_drive_service(credentials)
-    q = "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    q = (
+        "mimeType = 'application/vnd.google-apps.folder' "
+        "and trashed = false "
+        "and 'me' in owners"
+    )
     fields = "nextPageToken, files(id, name, parents)"
     out: list[dict] = []
     page_token = None
