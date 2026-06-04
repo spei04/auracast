@@ -24,7 +24,7 @@ from typing import Sequence
 from PIL import Image
 
 from auracast.engine.device import DeviceSpec, pick_device_and_dtype
-from auracast.schema.models import Caption, ImageRecord
+from auracast.schema.models import AestheticScore, Caption, Embedding, ImageRecord
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +196,84 @@ class Qwen2VLDescriber:
                 attributes=attributes,
             ))
         return out
+
+    # ---- Scoring via VLM judgment --------------------------------------
+
+    SCORING_PROMPT_TEMPLATE = (
+        "You are scoring a candidate Instagram photo against this brief:\n"
+        "\"{brief}\"\n\n"
+        "Rate the image from 0.00 to 1.00 on how well it matches the brief. "
+        "Pay attention to: facial expression and emotional authenticity when "
+        "people are present, eye contact, lighting, composition (rule of "
+        "thirds, headroom), background, and overall mood fit.\n\n"
+        "Respond with ONLY this JSON, no commentary:\n"
+        '{{"score": <0.00-1.00>, "reasons": "one sentence"}}'
+    )
+
+    def score(self, records: Sequence[ImageRecord], brief: str):
+        """Use Qwen2-VL to rate each image's fit to a natural-language brief.
+
+        Returns a list of (AestheticScore, raw_response) pairs; the score is
+        wrapped to match the same shape CLIP/LAION scorers return so the
+        Streamlit code can store it identically.
+        """
+        from auracast.engine.qwen2vl_describer import _extract_json
+        self._ensure_model()
+        prompt = self.SCORING_PROMPT_TEMPLATE.format(brief=brief.strip() or "a beautiful Instagram photograph")
+
+        outputs: list[tuple[AestheticScore, str]] = []
+        for rec in records:
+            if not rec.has_local_bytes():
+                logger.warning("skipping %s: no local bytes", rec.image_id)
+                continue
+            try:
+                with Image.open(rec.file_path) as im:
+                    im = im.convert("RGB")
+                    raw = self._generate_one_with_prompt(im, prompt)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("VLM score failed for %s: %s", rec.image_id, e)
+                continue
+            parsed = _extract_json(raw)
+            try:
+                score = float(parsed["score"]) if parsed else 0.0
+            except (KeyError, TypeError, ValueError):
+                score = 0.0
+            # Clamp to [0, 1] for schema compliance.
+            score = max(0.0, min(1.0, score))
+            outputs.append((
+                AestheticScore(
+                    image_id=rec.image_id,
+                    scorer=f"qwen2vl|{self.model_id}",
+                    score=score,
+                    raw_logits=None,
+                ),
+                raw,
+            ))
+        return outputs
+
+    def _generate_one_with_prompt(self, image: Image.Image, prompt: str) -> str:
+        """Like _generate_one but with a caller-supplied prompt."""
+        import torch
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": prompt},
+            ],
+        }]
+        text = self._processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = self._processor(
+            text=[text], images=[image], padding=True, return_tensors="pt"
+        ).to(self.spec.device)
+        with torch.no_grad():
+            generated_ids = self._model.generate(
+                **inputs, max_new_tokens=self.max_new_tokens, do_sample=False,
+            )
+        prompt_len = inputs.input_ids.shape[1]
+        new_tokens = generated_ids[:, prompt_len:]
+        return self._processor.batch_decode(new_tokens, skip_special_tokens=True)[0]
 
     def describe_stub(self, records: Sequence[ImageRecord]) -> list[Caption]:
         """Deterministic placeholder. Same shape as describe(), no model load."""

@@ -48,6 +48,28 @@ class ProcessingStatus(str, Enum):
     FAILED = "failed"          # see `error` for details
 
 
+class ScorerModel(str, Enum):
+    """Which scoring backend a project uses.
+
+    Prompt-based models read the project's positive_prompt/negative_prompt;
+    predictor-based models ignore them.
+    """
+
+    CLIP_PROMPT = "clip-prompt"            # CLIP ViT-B/32 + text prompts
+    LAION_AESTHETIC = "laion-aesthetic"    # CLIP ViT-L/14 + LAION MLP head, NO prompt
+    QWEN_VL_PROMPT = "qwen-vl-prompt"      # Qwen2-VL judging via JSON score, prompt
+
+
+SCORER_MODELS_TAKING_TEXT: frozenset[ScorerModel] = frozenset({
+    ScorerModel.CLIP_PROMPT,
+    ScorerModel.QWEN_VL_PROMPT,
+})
+
+
+def scorer_takes_text(model: ScorerModel) -> bool:
+    return model in SCORER_MODELS_TAKING_TEXT
+
+
 # -------- Core records ---------------------------------------------------
 
 
@@ -172,7 +194,8 @@ class DriveProject(BaseModel):
     """One curation project = one Drive folder + one manifest file.
 
     Each project owns its own aesthetic prompts (what to optimize for /
-    what to avoid). Scoring uses these to re-rank images via CLIP.
+    what to avoid) and chooses a scorer_model. Prompt fields are only
+    used when the chosen scorer is prompt-based (CLIP, Qwen-VL).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -180,6 +203,7 @@ class DriveProject(BaseModel):
     name: str  # user-facing label, must be unique within ProjectsConfig
     folder_id: str  # Drive folder ID
     manifest_path: Path  # where this project's JSONL lives
+    scorer_model: ScorerModel = ScorerModel.CLIP_PROMPT
     positive_prompt: str = "a beautiful, well-composed, high-quality photograph"
     negative_prompt: str = "a blurry, low-quality, poorly composed snapshot"
     created_at: datetime = Field(default_factory=_utcnow)

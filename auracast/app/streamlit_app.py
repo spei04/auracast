@@ -21,12 +21,19 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     st = None  # noqa: N816
 
+from auracast.engine.registry import (
+    SCORER_DESCRIPTIONS,
+    SCORER_LABELS,
+    rescore_store,
+)
 from auracast.persistence import ManifestStore
 from auracast.projects import ProjectsStore, parse_folder_id, slugify
 from auracast.schema.models import (
     DriveProject,
     ProcessingStatus,
     ReviewStatus,
+    ScorerModel,
+    scorer_takes_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -159,50 +166,82 @@ def _render_sync_sidebar(project: DriveProject, store: ManifestStore, download_d
 def _render_aesthetic_section(
     project: DriveProject, store: ManifestStore, projects: ProjectsStore,
 ) -> None:
-    """Top-of-page aesthetic prompt + score button.
+    """Top-of-page scorer-model picker + (conditional) prompt + score button.
 
-    User types what they're looking for; clicking Score re-scores every image
-    in the project with that prompt. Prompt is saved to the project.
+    Model dropdown swaps the scoring backend; prompt inputs are shown only
+    for backends that consume text.
     """
     with st.expander("🎯 Aesthetic goal — what should we optimize for?", expanded=len(store) == 0):
-        st.caption(
-            "Describe the look you want. The scorer ranks images by CLIP similarity to this "
-            "prompt minus similarity to the negative prompt below."
+        # ---- Model selection -----------------------------------------
+        model_options = list(SCORER_LABELS.keys())
+        try:
+            default_idx = model_options.index(project.scorer_model)
+        except ValueError:
+            default_idx = 0
+
+        selected_model: ScorerModel = st.selectbox(
+            "Scoring model",
+            options=model_options,
+            index=default_idx,
+            format_func=lambda m: SCORER_LABELS[m],
+            key=f"scorer_model_{project.name}",
         )
-        pos = st.text_area(
-            "Positive prompt (what you're looking for)",
-            value=project.positive_prompt,
-            height=80,
-            key=f"pos_{project.name}",
-            help="E.g. 'moody cinematic film-grain photo with deep shadows and rich contrast'",
-        )
-        with st.expander("Advanced: negative prompt"):
-            neg = st.text_area(
-                "Negative prompt (what to penalize)",
-                value=project.negative_prompt,
-                height=60,
-                key=f"neg_{project.name}",
+        st.caption(SCORER_DESCRIPTIONS[selected_model])
+
+        takes_text = scorer_takes_text(selected_model)
+        pos = project.positive_prompt
+        neg = project.negative_prompt
+
+        if takes_text:
+            pos = st.text_area(
+                "Positive prompt (what you're looking for)",
+                value=project.positive_prompt,
+                height=80,
+                key=f"pos_{project.name}",
+                help="E.g. 'warm authentic smile, direct eye contact, golden-hour lighting'",
+            )
+            with st.expander("Advanced: negative prompt"):
+                neg = st.text_area(
+                    "Negative prompt (what to penalize)",
+                    value=project.negative_prompt,
+                    height=60,
+                    key=f"neg_{project.name}",
+                )
+        else:
+            st.info(
+                "This model is a trained predictor — it doesn't take a text prompt. "
+                "It returns its own learned opinion of aesthetic quality."
             )
 
         n_to_score = len(store)
         button_label = (
-            f"🎯 Score all {n_to_score} image(s) with this prompt"
-            if n_to_score else "🎯 Save prompt (no images to score yet)"
+            f"🎯 Score all {n_to_score} image(s)"
+            if n_to_score else "🎯 Save scorer choice (no images yet)"
         )
         if st.button(button_label, type="primary", key=f"score_{project.name}"):
-            # Persist the prompt regardless of whether there are images.
-            projects.update_prompts(project.name, pos.strip(), neg.strip())
+            # Persist the picked model + prompts so this project remembers.
+            projects.update_scorer_model(project.name, selected_model)
+            projects.update_prompts(
+                project.name,
+                pos.strip() if takes_text else project.positive_prompt,
+                neg.strip() if takes_text else project.negative_prompt,
+            )
             if n_to_score == 0:
-                st.success("Prompt saved. Sync from Drive to start scoring.")
+                st.success("Saved. Sync from Drive to start scoring.")
                 st.rerun()
                 return
-            with st.spinner(f"Scoring {n_to_score} image(s) with the new prompt..."):
+            with st.spinner(f"Scoring {n_to_score} image(s) with {SCORER_LABELS[selected_model]}..."):
                 try:
-                    n_scored = _rescore_all(store, pos.strip(), neg.strip())
+                    n_scored = rescore_store(
+                        store,
+                        model=selected_model,
+                        positive_prompt=pos.strip() if takes_text else "",
+                        negative_prompt=neg.strip() if takes_text else "",
+                    )
                 except Exception as e:  # noqa: BLE001
                     st.error(f"Scoring failed: {e}")
                 else:
-                    st.success(f"Re-scored {n_scored} image(s).")
+                    st.success(f"Re-scored {n_scored} image(s) with {SCORER_LABELS[selected_model]}.")
                     st.rerun()
 
 
@@ -277,44 +316,6 @@ def _sync_from_drive(
         store.bulk_add([])
 
     return len(new_records), skipped
-
-
-def _rescore_all(store: ManifestStore, positive_prompt: str, negative_prompt: str) -> int:
-    """Re-score every item in the store with a fresh CLIP prompt pair.
-
-    Replaces each item's `.scores` list with a single new AestheticScore so the
-    UI reflects the active prompt. Embeddings are also refreshed (cheap — they
-    come from the same forward pass). Records without local bytes are skipped.
-
-    Returns the number of items actually re-scored.
-    """
-    from auracast.engine.clip_scorer import CLIPScorer
-
-    records = [item.record for item in store.all() if item.record.has_local_bytes()]
-    if not records:
-        return 0
-
-    scorer = CLIPScorer(
-        positive_prompt=positive_prompt or "a beautiful, well-composed, high-quality photograph",
-        negative_prompt=negative_prompt or "a blurry, low-quality, poorly composed snapshot",
-    )
-    outputs = scorer.score_batch(records)
-    by_id = {o.score.image_id: o for o in outputs}
-
-    n_updated = 0
-    for item in list(store.all()):
-        o = by_id.get(item.record.image_id)
-        if o is None:
-            continue
-        updated = item.model_copy(update={
-            "scores": [o.score],
-            "embeddings": [o.embedding],
-        })
-        updated.processing_status = updated.derive_processing_status()
-        store.add_or_update(updated, persist=False)
-        n_updated += 1
-    store.bulk_add([])  # one atomic flush at the end
-    return n_updated
 
 
 def _trash_rejected(store: ManifestStore, rejected_items) -> tuple[int, dict[str, str]]:

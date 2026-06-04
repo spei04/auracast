@@ -107,6 +107,17 @@ class ProjectsStore:
             self._flush_locked()
         return True
 
+    def update_scorer_model(self, name: str, model) -> bool:
+        """Update a project's scorer model selection. Returns False if name unknown."""
+        with self._lock:
+            existing = self._cfg.get(name)
+            if existing is None:
+                return False
+            idx = self._cfg.projects.index(existing)
+            self._cfg.projects[idx] = existing.model_copy(update={"scorer_model": model})
+            self._flush_locked()
+        return True
+
     def _flush_locked(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
