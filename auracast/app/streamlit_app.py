@@ -369,6 +369,23 @@ def main() -> None:  # pragma: no cover — Streamlit entry point
     args = _parse_args()
 
     st.set_page_config(page_title="AuraCast", layout="wide")
+
+    # Keep button labels on one line when columns narrow — wrapping looks ugly
+    # in the per-image Approve/Reject/Undo row and the sidebar action buttons.
+    st.markdown(
+        """
+        <style>
+        .stButton > button {
+            white-space: nowrap !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+            min-width: 0 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     st.title("AuraCast — Curation Preview")
 
     args.projects_config.parent.mkdir(parents=True, exist_ok=True)
