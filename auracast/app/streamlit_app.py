@@ -344,6 +344,23 @@ def _sync_from_drive(
     return len(new_records), skipped
 
 
+def _score_range(store: ManifestStore) -> tuple[float, float]:
+    """Min and max top_score across every item in the store. Returns (0, 1)
+    when nothing is scored yet."""
+    scores = [it.top_score() for it in store.all() if it.top_score() is not None]
+    if not scores:
+        return 0.0, 1.0
+    return min(scores), max(scores)
+
+
+def _normalize(value: float, lo: float, hi: float) -> float:
+    """Min-max normalize `value` against [lo, hi]. Returns 0.5 when lo == hi
+    (degenerate case: single image, or all images tied)."""
+    if hi <= lo:
+        return 0.5
+    return (value - lo) / (hi - lo)
+
+
 def _trash_rejected(store: ManifestStore, rejected_items) -> tuple[int, dict[str, str]]:
     """Move rejected images' Drive originals to Trash. Returns (ok, failed_map)."""
     from auracast.auth.google_oauth import load_credentials
@@ -427,8 +444,16 @@ def main() -> None:  # pragma: no cover — Streamlit entry point
         options=[s.value for s in ReviewStatus],
         default=[ReviewStatus.PENDING.value, ReviewStatus.APPROVED.value],
     )
-    min_score = st.sidebar.slider("Minimum aesthetic score", 0.0, 1.0, 0.0, 0.01)
+    min_score = st.sidebar.slider(
+        "Minimum score (normalized within this project)",
+        0.0, 1.0, 0.0, 0.01,
+        help="Min-max normalized against this project's score range. 0 = the worst-scoring image; 1 = the best.",
+    )
     hide_failed = st.sidebar.checkbox("Hide failed", value=True)
+
+    # Normalization range across ALL items (not just filtered). Stable as the
+    # user changes status filters / score threshold.
+    score_lo, score_hi = _score_range(store)
 
     if len(store) == 0:
         st.info("No images yet. Use **Sync from Drive** in the sidebar to populate this project.")
@@ -438,7 +463,11 @@ def main() -> None:  # pragma: no cover — Streamlit entry point
     items = [x for x in items if x.review_status.value in status_filter]
     if hide_failed:
         items = [x for x in items if x.processing_status != ProcessingStatus.FAILED]
-    items = [x for x in items if (x.top_score() or 0.0) >= min_score]
+    # Filter compares normalized values so the slider is intuitive across runs.
+    items = [
+        x for x in items
+        if _normalize(x.top_score() or 0.0, score_lo, score_hi) >= min_score
+    ]
     items.sort(key=lambda x: (x.top_score() or 0.0), reverse=True)
 
     st.write(f"Showing **{len(items)}** image(s).")
@@ -454,8 +483,12 @@ def main() -> None:  # pragma: no cover — Streamlit entry point
                     st.image(str(rec.file_path), width="stretch")
                 else:
                     st.write("(image bytes unavailable)")
-                score = item.top_score()
-                st.caption(f"score = {score:.3f}" if score is not None else "unscored")
+                raw_score = item.top_score()
+                if raw_score is not None:
+                    norm_score = _normalize(raw_score, score_lo, score_hi)
+                    st.caption(f"score {norm_score:.2f}  (raw {raw_score:.3f})")
+                else:
+                    st.caption("unscored")
                 badge = {
                     ReviewStatus.PENDING: "🟡 pending",
                     ReviewStatus.APPROVED: "✅ approved",
