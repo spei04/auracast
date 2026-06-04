@@ -93,6 +93,20 @@ class ProjectsStore:
                 self._flush_locked()
             return removed
 
+    def update_prompts(self, name: str, positive: str, negative: str) -> bool:
+        """Update a project's aesthetic prompts. Returns False if name unknown."""
+        with self._lock:
+            existing = self._cfg.get(name)
+            if existing is None:
+                return False
+            idx = self._cfg.projects.index(existing)
+            self._cfg.projects[idx] = existing.model_copy(update={
+                "positive_prompt": positive,
+                "negative_prompt": negative,
+            })
+            self._flush_locked()
+        return True
+
     def _flush_locked(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")

@@ -169,13 +169,19 @@ class ScoredImage(BaseModel):
 
 
 class DriveProject(BaseModel):
-    """One curation project = one Drive folder + one manifest file."""
+    """One curation project = one Drive folder + one manifest file.
+
+    Each project owns its own aesthetic prompts (what to optimize for /
+    what to avoid). Scoring uses these to re-rank images via CLIP.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str  # user-facing label, must be unique within ProjectsConfig
     folder_id: str  # Drive folder ID
     manifest_path: Path  # where this project's JSONL lives
+    positive_prompt: str = "a beautiful, well-composed, high-quality photograph"
+    negative_prompt: str = "a blurry, low-quality, poorly composed snapshot"
     created_at: datetime = Field(default_factory=_utcnow)
 
 

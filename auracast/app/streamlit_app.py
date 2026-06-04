@@ -156,6 +156,56 @@ def _render_sync_sidebar(project: DriveProject, store: ManifestStore, download_d
                 st.rerun()
 
 
+def _render_aesthetic_section(
+    project: DriveProject, store: ManifestStore, projects: ProjectsStore,
+) -> None:
+    """Top-of-page aesthetic prompt + score button.
+
+    User types what they're looking for; clicking Score re-scores every image
+    in the project with that prompt. Prompt is saved to the project.
+    """
+    with st.expander("🎯 Aesthetic goal — what should we optimize for?", expanded=len(store) == 0):
+        st.caption(
+            "Describe the look you want. The scorer ranks images by CLIP similarity to this "
+            "prompt minus similarity to the negative prompt below."
+        )
+        pos = st.text_area(
+            "Positive prompt (what you're looking for)",
+            value=project.positive_prompt,
+            height=80,
+            key=f"pos_{project.name}",
+            help="E.g. 'moody cinematic film-grain photo with deep shadows and rich contrast'",
+        )
+        with st.expander("Advanced: negative prompt"):
+            neg = st.text_area(
+                "Negative prompt (what to penalize)",
+                value=project.negative_prompt,
+                height=60,
+                key=f"neg_{project.name}",
+            )
+
+        n_to_score = len(store)
+        button_label = (
+            f"🎯 Score all {n_to_score} image(s) with this prompt"
+            if n_to_score else "🎯 Save prompt (no images to score yet)"
+        )
+        if st.button(button_label, type="primary", key=f"score_{project.name}"):
+            # Persist the prompt regardless of whether there are images.
+            projects.update_prompts(project.name, pos.strip(), neg.strip())
+            if n_to_score == 0:
+                st.success("Prompt saved. Sync from Drive to start scoring.")
+                st.rerun()
+                return
+            with st.spinner(f"Scoring {n_to_score} image(s) with the new prompt..."):
+                try:
+                    n_scored = _rescore_all(store, pos.strip(), neg.strip())
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"Scoring failed: {e}")
+                else:
+                    st.success(f"Re-scored {n_scored} image(s).")
+                    st.rerun()
+
+
 def _render_finalize_section(project: DriveProject, store: ManifestStore) -> None:
     """Bottom-of-page button: trash all REJECTED items on Drive."""
     rejected = [x for x in store.all() if x.review_status == ReviewStatus.REJECTED]
@@ -229,6 +279,44 @@ def _sync_from_drive(
     return len(new_records), skipped
 
 
+def _rescore_all(store: ManifestStore, positive_prompt: str, negative_prompt: str) -> int:
+    """Re-score every item in the store with a fresh CLIP prompt pair.
+
+    Replaces each item's `.scores` list with a single new AestheticScore so the
+    UI reflects the active prompt. Embeddings are also refreshed (cheap — they
+    come from the same forward pass). Records without local bytes are skipped.
+
+    Returns the number of items actually re-scored.
+    """
+    from auracast.engine.clip_scorer import CLIPScorer
+
+    records = [item.record for item in store.all() if item.record.has_local_bytes()]
+    if not records:
+        return 0
+
+    scorer = CLIPScorer(
+        positive_prompt=positive_prompt or "a beautiful, well-composed, high-quality photograph",
+        negative_prompt=negative_prompt or "a blurry, low-quality, poorly composed snapshot",
+    )
+    outputs = scorer.score_batch(records)
+    by_id = {o.score.image_id: o for o in outputs}
+
+    n_updated = 0
+    for item in list(store.all()):
+        o = by_id.get(item.record.image_id)
+        if o is None:
+            continue
+        updated = item.model_copy(update={
+            "scores": [o.score],
+            "embeddings": [o.embedding],
+        })
+        updated.processing_status = updated.derive_processing_status()
+        store.add_or_update(updated, persist=False)
+        n_updated += 1
+    store.bulk_add([])  # one atomic flush at the end
+    return n_updated
+
+
 def _trash_rejected(store: ManifestStore, rejected_items) -> tuple[int, dict[str, str]]:
     """Move rejected images' Drive originals to Trash. Returns (ok, failed_map)."""
     from auracast.auth.google_oauth import load_credentials
@@ -272,6 +360,9 @@ def main() -> None:  # pragma: no cover — Streamlit entry point
 
     project.manifest_path.parent.mkdir(parents=True, exist_ok=True)
     store = ManifestStore(project.manifest_path)
+
+    # Top-of-page aesthetic prompt editor + Score button.
+    _render_aesthetic_section(project, store, projects)
 
     # Sidebar sync, filters, stats
     st.sidebar.divider()
