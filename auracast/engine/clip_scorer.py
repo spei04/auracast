@@ -5,7 +5,7 @@ One class, two outputs per image:
   - AestheticScore in [0, 1] (from cosine similarity to a curated aesthetic prompt).
   - Embedding (the image-tower vector — same one used for similarity search later).
 
-Default backbone: `openai/clip-vit-base-patch32` — small, ~150 MB, fast on A100.
+Default backbone: `openai/clip-vit-base-patch32` — small, ~150 MB, fast.
 Swap via constructor arg without changing the call sites in the pipeline.
 
 All `torch` imports are gated to this module (per CLAUDE.md convention).

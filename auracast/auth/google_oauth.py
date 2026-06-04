@@ -7,17 +7,11 @@ local JSON file (gitignored). Refreshes on expiry. Returns an authorized
 in this module's `build_*_service` helpers consume.
 
 **First-time auth is interactive** — `flow.run_local_server()` opens a
-browser. On a headless cluster compute node this won't work. The usage
-pattern is:
-  1. On your Mac, run `python -m auracast.scripts.auth_setup` — browser
-     opens, you grant scopes, token.json is written.
-  2. Copy `token.json` to scratch on the cluster (a path matched by the
-     `AURACAST_TOKEN_PATH` env var or the default below).
-  3. Cluster jobs `load_credentials()` and refresh silently as needed.
+browser. Run `python -m auracast.scripts.auth_setup` once; the resulting
+`token.json` is reused silently afterwards (and refreshed when it expires).
 
 Refresh tokens are long-lived (~6 months for Google) but not forever — if
-the cluster job ever errors with `invalid_grant`, the user re-runs the
-Mac-side setup script.
+the app ever errors with `invalid_grant`, re-run the setup script.
 """
 
 from __future__ import annotations
@@ -41,7 +35,7 @@ DEFAULT_SCOPES: tuple[str, ...] = (
 
 
 def _default_secrets_dir() -> Path:
-    """Cluster-friendly default: env var beats $HOME (which is /tmp on Beery nodes)."""
+    """Default secrets directory, overridable via AURACAST_SECRETS_DIR."""
     if env := os.environ.get("AURACAST_SECRETS_DIR"):
         return Path(env)
     return Path.home() / ".config" / "auracast"
@@ -76,8 +70,7 @@ def load_credentials(
     Args:
         cfg: OAuthConfig (paths + scopes). Defaults pick up env vars.
         interactive: If None (default), allow the browser flow only when a
-            valid TTY is present (i.e. on your Mac, not on a compute node).
-            Set True/False to force either way.
+            TTY is present. Set True/False to force either way.
 
     Raises:
         FileNotFoundError: token cache absent AND not allowed to run the
@@ -116,8 +109,7 @@ def load_credentials(
     if not interactive:
         raise FileNotFoundError(
             f"No valid Google OAuth token at {cfg.token_cache_path}. "
-            f"Run `python -m auracast.scripts.auth_setup` on a machine "
-            f"with a browser, then copy the token to that path on this host."
+            f"Run `python -m auracast.scripts.auth_setup` to generate one."
         )
 
     if not cfg.client_secrets_path.exists():

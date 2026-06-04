@@ -2,9 +2,10 @@
 
 **An automated, AI-driven Instagram curation system.**
 
-Curates a stream of candidate images (eventually pulled live from Google services,
-locally during development) by scoring them with on-prem vision models, then
-surfacing the top picks for human review and publication.
+Curates a stream of candidate images (pulled from Google Drive in
+production, local directories in development) by scoring them with on-prem
+vision models, then surfacing the top picks for human review and
+publication.
 
 ## Architectural principles
 
@@ -17,9 +18,8 @@ surfacing the top picks for human review and publication.
   else. Everything upstream produces `ImageRecord`s; everything downstream
   consumes `Embedding`s + `AestheticScore`s. The engine module is the only
   place that imports `torch`.
-- **A100-aware by default.** FP16 mixed precision, batched inference,
-  `device_map="auto"` for multi-GPU when present. Falls back to CPU/MPS on
-  the dev box for unit tests only.
+- **GPU-aware by default.** FP16 mixed precision when CUDA is available;
+  falls back to FP32 on Apple MPS or CPU (slow but functional for tests).
 - **Production-grade, not research-grade.** This is a system that should be
   reliable for an end user, not a sprint of experiments. Tests, type hints,
   structured logging, retries on the network boundary.
@@ -30,32 +30,29 @@ surfacing the top picks for human review and publication.
 auracast/
 ├── auth/        Google OAuth2 + API connection. Token cache, refresh,
 │                scope management. Returns authenticated httpx clients.
-├── ingest/      Async image acquisition. Two backends behind one interface:
-│                LocalDirectoryIngest (dev) and GoogleAPIIngest (prod).
+├── ingest/      Async image acquisition. Backends behind one interface:
+│                LocalDirectoryIngest (dev) and GoogleDriveIngest (prod).
 │                Produces ImageRecord rows; does NOT score or embed.
-├── engine/      Vision model orchestration. CLIP/SigLIP for aesthetic
-│                scoring + embeddings. Qwen2-VL for captions / structured
-│                attribute extraction. FP16 mixed-precision A100 path.
-│                The only module that imports torch / transformers.
-├── app/         Streamlit interface. Loads scored records, displays
-│                synthesized post previews, captures human approve/reject.
+├── engine/      Vision model orchestration. CLIP / LAION-Aesthetic /
+│                Qwen2-VL. FP16 on CUDA, FP32 on MPS/CPU. The only module
+│                that imports torch / transformers.
+├── app/         Streamlit interface. Multi-project curation UI: project
+│                picker, custom-prompt scoring, approve/reject, finalize.
 ├── schema/      Pydantic models. Single source of truth for the on-disk
 │                manifest format and the in-memory record types.
-└── scripts/     Verification + one-off runners.
-                 - verify_clip_a100.py: smoke test on the GPU.
-                 - mock_pipeline_demo.py: end-to-end local-dir demo.
+└── scripts/     Entry-point runners (auth_setup, pipeline, mock demo).
 ```
 
 ## Data flow
 
 ```
-  [LocalDir | Google API]                       (ingest/)
+  [LocalDir | Google Drive]                     (ingest/)
             │
             ▼
       ImageRecord                               (schema/)
             │
             ▼
-  CLIP/SigLIP scoring + embedding              (engine/)
+  CLIP / LAION / Qwen2-VL scoring              (engine/)
             │
             ▼
    AestheticScore + Embedding                   (schema/)
@@ -64,7 +61,7 @@ auracast/
    Streamlit preview / approve                  (app/)
             │
             ▼
-      Publish (out of scope for v0)
+   Drive Trash (Finalize) — published manually
 ```
 
 ## Technology choices
@@ -73,24 +70,23 @@ auracast/
 - **Pydantic v2** for all data records (`auracast/schema/models.py`). No
   ad-hoc dicts across module boundaries.
 - **PyTorch + Transformers** for model loading. Default scorer:
-  `openai/clip-vit-base-patch32` (lightweight, ~150 MB). Production:
-  `google/siglip-so400m-patch14-384` once latency budget allows.
+  `openai/clip-vit-base-patch32` (lightweight, ~150 MB). Premium scorers:
+  LAION Aesthetic Predictor (CLIP-L/14 + trained MLP head), Qwen2-VL-7B.
 - **httpx (async)** for the network boundary. `aiofiles` for disk I/O on
-  the ingest path so a single worker can saturate the link.
+  the ingest path.
 - **Pillow** for decode + light pre-processing only. Heavy transforms
   belong in the model's own processor.
 - **Streamlit** for the UI. Single-file app in `auracast/app/streamlit_app.py`.
 
 ## Hardware target
 
-Primary: a single NVIDIA A100 80 GB on the MIT Beery vision cluster
-(see `~/.claude/projects/...auracast/memory/reference_beery_cluster.md`).
-FP16 mixed precision. Batch size scales with VRAM headroom — start at
-32 for CLIP-B/32, autotune up.
+Local dev box (Mac M-series with MPS, or any CPU): all CLIP/LAION scoring
+runs fine, ~1s/image. Qwen2-VL is slow on MPS (~5s/image) but functional
+for small batches.
 
-Dev box: Mac M4 (CPU/MPS) — only used for unit tests, never for actual
-scoring runs. The GPU code paths are CPU-tested via dimensions + dtypes
-but model-loading tests are gated by `torch.cuda.is_available()`.
+CUDA host (any NVIDIA card, ideally ≥24 GB VRAM for Qwen2-VL): FP16
+mixed precision selected automatically by `pick_device_and_dtype()`.
+Batch size scales with VRAM headroom — start at 32 for CLIP-B/32.
 
 ## Conventions
 
@@ -101,20 +97,19 @@ but model-loading tests are gated by `torch.cuda.is_available()`.
 - Logging via `logging` with a per-module `logger = logging.getLogger(__name__)`.
 - Tests in `tests/test_<module>.py`, CPU-runnable.
 
-## Phase plan
+## Phase status (current)
 
-- **Phase 0 — scaffold (this commit)**: directories, Pydantic schema, mock
-  ingest pipeline, CLIP A100 verification script, Streamlit stub.
-- **Phase 1 — local end-to-end**: ingest local dir → score + embed → write
-  manifest → Streamlit preview. No external APIs.
-- **Phase 2 — Google integration**: OAuth2 flow, Photos / Drive ingest
-  adapter behind the existing `IngestSource` interface.
-- **Phase 3 — quality + UX**: human feedback loop captured back into the
-  manifest; per-user aesthetic preference learning; post-composition logic.
+- **Phase 0**: scaffold, Pydantic schema, mock pipeline. ✅
+- **Phase 1**: local end-to-end with persistence + dedupe. ✅
+- **Phase 1.5**: Qwen2-VL captioning. ✅
+- **Phase 2**: Google OAuth + Drive ingest. ✅
+- **Phase 2b**: multi-project UI + folder picker + Finalize. ✅
+- **Phase 2c**: custom prompts, scorer model dropdown, normalization. ✅
+- **Phase 3 — Instagram publishing**: not started.
 
 ## Out of scope (for now)
 
 - Actually publishing to Instagram (no Graph API integration yet).
 - Multi-user / multi-tenant.
-- Persistent database (Postgres etc.) — manifest is a JSONL file on disk
-  through Phase 1; migration when it's actually a bottleneck.
+- Persistent database (Postgres etc.) — manifest is a JSONL file on disk;
+  migration when it's actually a bottleneck.

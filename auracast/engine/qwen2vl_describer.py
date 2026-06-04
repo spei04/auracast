@@ -6,9 +6,9 @@ attributes (mood, subject, hashtags) parsed from a JSON response. The model
 is asked to emit JSON; we extract it robustly and fall back to free-form
 text if parsing fails.
 
-The 7B-Instruct variant is the default — best quality/cost trade-off on a
-single A100-80GB at FP16 (~14 GB VRAM). 2B is available for fast iteration;
-72B requires multi-GPU and is intentionally out of scope.
+The 7B-Instruct variant is the default — best quality/cost trade-off at
+FP16 (~14 GB VRAM). The 2B variant is available for fast iteration on
+modest hardware; 72B is out of scope.
 
 Model loading is lazy. Instantiating the class is cheap; the first
 `describe()` call pays the ~30s load cost.
@@ -126,7 +126,7 @@ class Qwen2VLDescriber:
         )
         self._processor = AutoProcessor.from_pretrained(self.model_id)
         # device_map="auto" lets transformers shard across multi-GPU when
-        # available; on a single A100 it pins everything to GPU 0.
+        # available; on a single-GPU host it pins everything to GPU 0.
         self._model = Qwen2VLForConditionalGeneration.from_pretrained(
             self.model_id,
             torch_dtype=self.spec.dtype,

@@ -1,10 +1,9 @@
 """
 First-time Google OAuth setup.
 
-Runs on your *Mac* (or any machine with a browser). Opens the consent screen,
-asks you to grant the requested scopes, writes the resulting token to
-`AURACAST_TOKEN_PATH` (or `~/.config/auracast/token.json`). After this you
-copy that token file to the cluster.
+Opens the consent screen in your browser, asks you to grant the requested
+scopes, writes the resulting token to `AURACAST_TOKEN_PATH` (or
+`~/.config/auracast/token.json` by default).
 
 Usage:
     # 1. Put your OAuth client_secrets.json in ~/.config/auracast/
@@ -13,9 +12,6 @@ Usage:
     # 2. Run this:
     python -m auracast.scripts.auth_setup
     # 3. Browser opens, you grant scopes, token.json is written.
-    # 4. Copy the token to the cluster:
-    scp ~/.config/auracast/token.json \\
-        beery:/data/vision/beery/scratch/serena/.auracast/secrets/token.json
 """
 
 from __future__ import annotations
@@ -70,14 +66,9 @@ def main():
         )
 
     # interactive=True forces the browser flow even when stdin isn't a TTY
-    # (e.g. when running under VSCode terminal which sometimes doesn't isatty).
+    # (e.g. when running under a terminal that doesn't report isatty).
     load_credentials(cfg, interactive=True)
     logger.info("done. token written to %s", cfg.token_cache_path)
-    print(f"\nTo use on the cluster:\n"
-          f"  scp {cfg.token_cache_path} <user>@cluster:<scratch>/.auracast/secrets/token.json\n"
-          f"  ssh into cluster; set\n"
-          f"    export AURACAST_TOKEN_PATH=<scratch>/.auracast/secrets/token.json\n"
-          f"  in your .bashrc.\n")
 
 
 if __name__ == "__main__":

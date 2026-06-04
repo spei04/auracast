@@ -36,7 +36,3 @@ data/mock_images/*
 manifests/
 *.jsonl
 *.parquet
-
-# Slurm logs
-scripts/slurm/logs/*
-!scripts/slurm/logs/.gitkeep

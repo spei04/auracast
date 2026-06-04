@@ -78,8 +78,7 @@ Each project stays independent — its own folder, scoring criteria, scored mani
 ## For developers
 
 - Architecture, module layout, and conventions: see [CLAUDE.md](./CLAUDE.md).
-- Tests: `pytest` (104 tests, all CPU-runnable).
-- Cluster slurm scripts: `scripts/slurm/verify_a100.sh`, `scripts/slurm/verify_qwen2vl.sh`. Configured for the MIT Beery vision cluster but easy to adapt.
+- Tests: `pytest` (all CPU-runnable).
 
 ## Limitations / things to know
 
