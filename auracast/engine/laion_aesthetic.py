@@ -58,6 +58,37 @@ class ScorerOutput:
     embedding: Embedding
 
 
+class _MLPHead(nn.Module):
+    """The MLP head architecture used by the LAION aesthetic predictor.
+
+    Matches the layer numbering in the checkpoint state_dict:
+        layers.0  Linear(768 -> 1024)
+        layers.1  Dropout(0.2)
+        layers.2  Linear(1024 -> 128)
+        layers.3  Dropout(0.2)
+        layers.4  Linear(128 -> 64)
+        layers.5  Dropout(0.1)
+        layers.6  Linear(64 -> 16)
+        layers.7  Linear(16 -> 1)
+    """
+
+    def __init__(self, input_size: int = 768):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(input_size, 1024),
+            nn.Dropout(0.2),
+            nn.Linear(1024, 128),
+            nn.Dropout(0.2),
+            nn.Linear(128, 64),
+            nn.Dropout(0.1),
+            nn.Linear(64, 16),
+            nn.Linear(16, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.layers(x)
+
+
 class LaionAestheticScorer:
     """Single-pass aesthetic scorer. No prompt input.
 
@@ -91,7 +122,7 @@ class LaionAestheticScorer:
             .eval()
         )
         weights = _download_weights(self.weights_path)
-        head = nn.Linear(768, 1)
+        head = _MLPHead(input_size=768)
         state = torch.load(weights, map_location="cpu", weights_only=True)
         head.load_state_dict(state)
         self._head = head.to(self.spec.device).eval()
@@ -124,8 +155,9 @@ class LaionAestheticScorer:
             return []
 
         embeds = self._encode_images(pil_images)  # [B, 768]
-        raw_scores = self._head(embeds).squeeze(-1)  # [B]
-        normalized = (raw_scores / 10.0).clamp(0.0, 1.0).cpu().tolist()
+        raw_scores = self._head(embeds).squeeze(-1)  # [B], roughly in 1-10 range
+        # Head was trained on 1-10 human ratings — map to [0, 1] using that range.
+        normalized = ((raw_scores - 1.0) / 9.0).clamp(0.0, 1.0).cpu().tolist()
         vectors = embeds.cpu().tolist()
         dim = embeds.shape[-1]
 
