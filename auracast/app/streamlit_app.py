@@ -140,7 +140,7 @@ def _render_sync_sidebar(project: DriveProject, store: ManifestStore, download_d
     max_items = st.sidebar.number_input(
         "Max items per sync", min_value=1, max_value=500, value=50, step=10,
     )
-    if st.sidebar.button("🔄 Sync now", type="primary", use_container_width=True):
+    if st.sidebar.button("🔄 Sync now", type="primary", width="stretch"):
         with st.spinner("Pulling + scoring from Drive..."):
             try:
                 new_count, skipped = _sync_from_drive(
@@ -407,7 +407,7 @@ def main() -> None:  # pragma: no cover — Streamlit entry point
             with col:
                 rec = item.record
                 if rec.file_path and rec.file_path.exists():
-                    st.image(str(rec.file_path), use_container_width=True)
+                    st.image(str(rec.file_path), width="stretch")
                 else:
                     st.write("(image bytes unavailable)")
                 score = item.top_score()
